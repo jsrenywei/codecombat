@@ -176,12 +176,6 @@ setupFeaturesMiddleware = (app) ->
       features.brainPop = true
       features.noAds = true
 
-    if req.headers.host is 'cp.codecombat.com' or req.session.featureMode is 'code-play'
-      features.freeOnly = true
-      features.campaignSlugs = ['dungeon', 'forest', 'desert']
-      features.playViewsOnly = true
-      features.codePlay = true # for one-off changes. If they're shared across different scenarios, refactor
-
     if /cn\.codecombat\.com/.test(req.get('host')) or /koudashijie/.test(req.get('host')) or req.session.featureMode is 'china'
       features.china = true
       features.freeOnly = true
@@ -288,10 +282,10 @@ setupQuickBailToMainHTML = (app) ->
         res.header 'Pragma', 'no-cache'
         res.header 'Expires', 0
 
-      if req.headers.host is 'cp.codecombat.com'
-        features.codePlay = true # for one-off changes. If they're shared across different scenarios, refactor
-      if /cn\.codecombat\.com/.test(req.get('host'))
+      if /cn\.codecombat\.com/.test(req.get('host')) or /koudashijie\.com/.test(req.get('host'))
         features.china = true
+        if template is 'home.html'
+          template = 'home-cn.html'
 
       if config.chinaInfra
         features.chinaInfra = true
@@ -329,8 +323,17 @@ setupProxyMiddleware = (app) ->
   return if config.isProduction
   return unless config.proxy
   httpProxy = require 'http-proxy'
+
+  target = 'https://direct.staging.codecombat.com'
+  headers = {}
+
+  if (process.env.COCO_PROXY_NEXT)
+    target = 'https://direct.next.codecombat.com'
+    headers['Host'] = 'next.codecombat.com'
+
   proxy = httpProxy.createProxyServer({
-    target: 'https://very.direct.codecombat.com'
+    target,
+    headers,
     secure: false
   })
   log.info 'Using dev proxy server'

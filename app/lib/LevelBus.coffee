@@ -140,7 +140,6 @@ module.exports = class LevelBus extends Bus
 
   onWinnabilityUpdated: (e) ->
     return unless @onPoint() and e.winnable
-    return unless e.level.get('slug') in ['ace-of-coders', 'elemental-wars', 'the-battle-of-sky-span', 'tesla-tesoro', 'escort-duty', 'treasure-games']  # Mirror matches don't otherwise show victory, so we win here.  # TODO: remove once these levels are configured as mirror matches
     return unless e.level.get('mirrorMatch')  # Mirror matches don't otherwise show victory, so we win here.
     return if @session.get('state')?.complete
     @onVictory()
@@ -198,8 +197,9 @@ module.exports = class LevelBus extends Bus
     @changedSessionProperties.state = true
     @saveSession()
 
-  onVictory: ->
+  onVictory: (e) ->
     return unless @onPoint()
+    return if e and e.capstoneInProgress
     state = @session.get('state')
     state.complete = true
     @session.set('state', state)

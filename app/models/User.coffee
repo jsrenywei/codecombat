@@ -4,6 +4,7 @@ ThangTypeConstants = require 'lib/ThangTypeConstants'
 LevelConstants = require 'lib/LevelConstants'
 utils = require 'core/utils'
 api = require 'core/api'
+co = require 'co'
 
 # Pure functions for use in Vue
 # First argument is always a raw User.attributes
@@ -12,6 +13,8 @@ UserLib = {
   broadName: (user) ->
     return '(deleted)' if user.deleted
     name = _.filter([user.firstName, user.lastName]).join(' ')
+    if features?.china
+      name = user.firstName
     return name if name
     name = user.name
     return name if name
@@ -19,6 +22,9 @@ UserLib = {
     return emailName if emailName
     return 'Anonymous'
   isSmokeTestUser: (user) -> utils.isSmokeTestEmail(user.email)
+  isTeacher: (user, includePossibleTeachers=false) ->
+    return true if includePossibleTeachers and user.role is 'possible teacher'  # They maybe haven't created an account but we think they might be a teacher based on behavior
+    return user.role in ['teacher', 'technology coordinator', 'advisor', 'principal', 'superintendent', 'parent']
 }
 
 module.exports = class User extends CocoModel
@@ -26,17 +32,27 @@ module.exports = class User extends CocoModel
   @schema: require 'schemas/models/user'
   urlRoot: '/db/user'
   notyErrors: false
+  PERMISSIONS: {
+    COCO_ADMIN: 'admin',
+    SCHOOL_ADMINISTRATOR: 'schoolAdministrator',
+    ARTISAN: 'artisan',
+    GOD_MODE: 'godmode',
+    LICENSOR: 'licensor'
+  }
 
-  isAdmin: -> 'admin' in @get('permissions', true)
-  isLicensor: -> 'licensor' in @get('permissions', true)
-  isArtisan: -> 'artisan' in @get('permissions', true)
-  isInGodMode: -> 'godmode' in @get('permissions', true)
+  isAdmin: -> @PERMISSIONS.COCO_ADMIN in @get('permissions', true)
+  isLicensor: -> @PERMISSIONS.LICENSOR in @get('permissions', true)
+  isArtisan: -> @PERMISSIONS.ARTISAN in @get('permissions', true)
+  isInGodMode: -> @PERMISSIONS.GOD_MODE in @get('permissions', true)
+  isSchoolAdmin: -> @PERMISSIONS.SCHOOL_ADMINISTRATOR in @get('permissions', true)
   isAnonymous: -> @get('anonymous', true)
   isSmokeTestUser: -> User.isSmokeTestUser(@attributes)
+
   displayName: -> @get('name', true)
   broadName: -> User.broadName(@attributes)
 
   inEU: (defaultIfUnknown=true) -> unless @get('country') then defaultIfUnknown else utils.inEU(@get('country'))
+  addressesIncludeAdministrativeRegion: (defaultIfUnknown=true) -> unless @get('country') then defaultIfUnknown else utils.addressesIncludeAdministrativeRegion(@get('country'))
 
   getPhotoURL: (size=80) ->
     return '' if application.testing
@@ -79,9 +95,57 @@ module.exports = class User extends CocoModel
 
   isStudent: -> @get('role') is 'student'
 
-  isTeacher: (includePossibleTeachers=false) ->
-    return true if includePossibleTeachers and @get('role') is 'possible teacher'  # They maybe haven't created an account but we think they might be a teacher based on behavior
-    return @get('role') in ['teacher', 'technology coordinator', 'advisor', 'principal', 'superintendent', 'parent']
+  isCreatedByClient: -> @get('clientCreator')?
+
+  isTeacher: (includePossibleTeachers=false) -> User.isTeacher(@attributes, includePossibleTeachers)
+
+  isPaidTeacher: ->
+    return false unless @isTeacher()
+    return @isCreatedByClient() or (/@codeninjas.com$/i.test me.get('email'))
+
+  isTeacherOf: co.wrap ({ classroom, classroomId, courseInstance, courseInstanceId }) ->
+    if not me.isTeacher()
+      return false
+
+    if classroomId and not classroom
+      Classroom = require 'models/Classroom'
+      classroom = new Classroom({ _id: classroomId })
+      yield classroom.fetch()
+
+    if classroom
+      return true if @get('_id') == classroom.get('ownerID')
+
+    if courseInstanceId and not courseInstance
+      CourseInstance = require 'models/CourseInstance'
+      courseInstance = new CourseInstance({ _id: courseInstanceId })
+      yield courseInstance.fetch()
+
+    if courseInstance
+      return true if @get('id') == courseInstance.get('ownerID')
+
+    return false
+
+  isSchoolAdminOf: co.wrap ({ classroom, classroomId, courseInstance, courseInstanceId }) ->
+    if not me.isSchoolAdmin()
+      return false
+
+    if classroomId and not classroom
+      Classroom = require 'models/Classroom'
+      classroom = new Classroom({ _id: classroomId })
+      yield classroom.fetch()
+
+    if classroom
+      return true if classroom.get('ownerID') in @get('administratedTeachers')
+
+    if courseInstanceId and not courseInstance
+      CourseInstance = require 'models/CourseInstance'
+      courseInstance = new CourseInstance({ _id: courseInstanceId })
+      yield courseInstance.fetch()
+
+    if courseInstance
+      return true if courseInstance.get('ownerID') in @get('administratedTeachers')
+
+    return false
 
   isSessionless: ->
     Boolean((utils.getQueryVariable('dev', false) or me.isTeacher()) and utils.getQueryVariable('course', false) and not utils.getQueryVariable('course-instance'))
@@ -92,7 +156,7 @@ module.exports = class User extends CocoModel
       clientID = utils.getApiClientIdFromEmail(@get('email'))
     if clientID
       api.apiClients.getByHandle(clientID)
-      .then((apiClient) => 
+      .then((apiClient) =>
         @clientPermissions = apiClient.permissions
       )
       .catch((e) =>
@@ -111,7 +175,7 @@ module.exports = class User extends CocoModel
     return if oldRole is role or (oldRole and not force)
     @set 'role', role
     @patch()
-    application.tracker?.updateRole()
+    application.tracker.identify()
     return @get 'role'
 
   a = 5
@@ -187,46 +251,6 @@ module.exports = class User extends CocoModel
         return
     return errors
 
-  getCampaignAdsGroup: ->
-    return @campaignAdsGroup if @campaignAdsGroup
-    # group = me.get('testGroupNumber') % 2
-    # @campaignAdsGroup = switch group
-    #   when 0 then 'no-ads'
-    #   when 1 then 'leaderboard-ads'
-    @campaignAdsGroup = 'leaderboard-ads'
-    @campaignAdsGroup = 'no-ads' if me.isAdmin()
-    application.tracker.identify campaignAdsGroup: @campaignAdsGroup unless me.isAdmin()
-    @campaignAdsGroup
-
-  # TODO: full removal of sub modal test
-  getSubModalGroup: () ->
-    return @subModalGroup if @subModalGroup
-    @subModalGroup = 'both-subs'
-    @subModalGroup
-  setSubModalGroup: (val) ->
-    @subModalGroup = if me.isAdmin() then 'both-subs' else val
-    @subModalGroup
-
-  # Signs and Portents was receiving updates after test started, and also had a big bug on March 4, so just look at test from March 5 on.
-  # ... and stopped working well until another update on March 10, so maybe March 11+...
-  # ... and another round, and then basically it just isn't completing well, so we pause the test until we can fix it.
-  getFourthLevelGroup: ->
-    return 'forgetful-gemsmith'
-    return @fourthLevelGroup if @fourthLevelGroup
-    group = me.get('testGroupNumber') % 8
-    @fourthLevelGroup = switch group
-      when 0, 1, 2, 3 then 'signs-and-portents'
-      when 4, 5, 6, 7 then 'forgetful-gemsmith'
-    @fourthLevelGroup = 'signs-and-portents' if me.isAdmin()
-    application.tracker.identify fourthLevelGroup: @fourthLevelGroup unless me.isAdmin()
-    @fourthLevelGroup
-
-  getVideoTutorialStylesIndex: (numVideos=0)->
-    # A/B Testing video tutorial styles
-    # Not a constant number of videos available (e.g. could be 0, 1, 3, or 4 currently)
-    return 0 unless numVideos > 0
-    return me.get('testGroupNumber') % numVideos
-
   hasSubscription: ->
     return false if me.isStudent() or me.isTeacher()
     if payPal = @get('payPal')
@@ -250,6 +274,7 @@ module.exports = class User extends CocoModel
   isOnPremiumServer: ->
     return true if me.get('country') in ['brazil']
     return true if me.get('country') in ['china'] and (me.isPremium() or me.get('stripe'))
+    return true if features?.china
     return false
 
   sendVerificationCode: (code) ->
@@ -294,11 +319,20 @@ module.exports = class User extends CocoModel
     return 'enrolled' unless coursePrepaid.endDate
     return if coursePrepaid.endDate > new Date().toISOString() then 'enrolled' else 'expired'
 
-  prepaidType: ->
+  prepaidType: (includeCourseIDs) =>
     # TODO: remove once legacy prepaidIDs are migrated to objects
     return undefined unless @get('coursePrepaid') or @get('coursePrepaidID')
+    type = @get('coursePrepaid')?.type
+    # Note: currently includeCourseIDs is a argument only used when displaying
+    # customized license's course names.
+    # Be careful to match the returned string EXACTLY to avoid comparison issues
+    if includeCourseIDs
+      courses = @get('coursePrepaid')?.includedCourseIDs
+      # return all courses names join with + as customized licenses's name
+      if type == 'course' and Array.isArray(courses)
+        return (courses.map (id) -> utils.courseAcronyms[id]).join('+')
     # NOTE: Default type is 'course' if no type is marked on the user's copy
-    return @get('coursePrepaid')?.type or 'course'
+    return type or 'course'
 
   prepaidIncludesCourse: (course) ->
     return false unless @get('coursePrepaid') or @get('coursePrepaidID')
@@ -336,11 +370,14 @@ module.exports = class User extends CocoModel
     options.url = '/auth/logout'
     FB?.logout?()
     options.success ?= ->
-      location = _.result(window.currentView, 'logoutRedirectURL')
-      if location
-        window.location = location
-      else
-        window.location.reload()
+      window.application.tracker.identifyAfterNextPageLoad()
+      window.application.tracker.resetIdentity().finally =>
+        location = _.result(window.currentView, 'logoutRedirectURL')
+        if location
+          window.location = location
+        else
+          window.location.reload()
+
     @fetch(options)
 
   signupWithPassword: (name, email, password, options={}) ->
@@ -349,6 +386,7 @@ module.exports = class User extends CocoModel
     options.data ?= {}
     _.extend(options.data, {name, email, password})
     options.contentType = 'application/json'
+    options.xhrFields = { withCredentials: true }
     options.data = JSON.stringify(options.data)
     jqxhr = @fetch(options)
     jqxhr.then ->
@@ -361,6 +399,7 @@ module.exports = class User extends CocoModel
     options.data ?= {}
     _.extend(options.data, {name, email, facebookID, facebookAccessToken: application.facebookHandler.token()})
     options.contentType = 'application/json'
+    options.xhrFields = { withCredentials: true }
     options.data = JSON.stringify(options.data)
     jqxhr = @fetch(options)
     jqxhr.then ->
@@ -374,6 +413,7 @@ module.exports = class User extends CocoModel
     options.data ?= {}
     _.extend(options.data, {name, email, gplusID, gplusAccessToken: application.gplusHandler.token()})
     options.contentType = 'application/json'
+    options.xhrFields = { withCredentials: true }
     options.data = JSON.stringify(options.data)
     jqxhr = @fetch(options)
     jqxhr.then ->
@@ -381,15 +421,17 @@ module.exports = class User extends CocoModel
       window.tracker?.trackEvent 'Finished Signup', category: "Signup", label: 'GPlus'
     return jqxhr
 
-  fetchGPlusUser: (gplusID, options={}) ->
+  fetchGPlusUser: (gplusID, email, options={}) ->
     options.data ?= {}
     options.data.gplusID = gplusID
     options.data.gplusAccessToken = application.gplusHandler.token()
+    options.data.email = email
     @fetch(options)
 
   loginGPlusUser: (gplusID, options={}) ->
     options.url = '/auth/login-gplus'
     options.type = 'POST'
+    options.xhrFields = { withCredentials: true }
     options.data ?= {}
     options.data.gplusID = gplusID
     options.data.gplusAccessToken = application.gplusHandler.token()
@@ -404,16 +446,26 @@ module.exports = class User extends CocoModel
   loginFacebookUser: (facebookID, options={}) ->
     options.url = '/auth/login-facebook'
     options.type = 'POST'
+    options.xhrFields = { withCredentials: true }
     options.data ?= {}
     options.data.facebookID = facebookID
     options.data.facebookAccessToken = application.facebookHandler.token()
     @fetch(options)
 
   loginPasswordUser: (usernameOrEmail, password, options={}) ->
+    options.xhrFields = { withCredentials: true }
     options.url = '/auth/login'
     options.type = 'POST'
     options.data ?= {}
     _.extend(options.data, { username: usernameOrEmail, password })
+    @fetch(options)
+
+  confirmBindAIYouth: (provider, token, options={}) ->
+    options.url = '/auth/bind-aiyouth'
+    options.type = 'POST'
+    options.data ?= {}
+    options.data.token = token
+    options.data.provider = provider
     @fetch(options)
 
   makeCoursePrepaid: ->
@@ -500,13 +552,50 @@ module.exports = class User extends CocoModel
   allowStudentHeroPurchase: -> features?.classroomItems ? false and @isStudent()
   canBuyGems: -> not (features?.chinaUx ? false)
   constrainHeroHealth: -> features?.classroomItems ? false and @isStudent()
+  promptForClassroomSignup: -> not ((features?.chinaUx ? false) or (window.serverConfig?.codeNinjas ? false) or (features?.brainPop ? false))
   showAvatarOnStudentDashboard: -> not (features?.classroomItems ? false) and @isStudent()
   showGearRestrictionsInClassroom: -> features?.classroomItems ? false and @isStudent()
   showGemsAndXp: -> features?.classroomItems ? false and @isStudent()
   showHeroAndInventoryModalsToStudents: -> features?.classroomItems and @isStudent()
   skipHeroSelectOnStudentSignUp: -> features?.classroomItems ? false
   useDexecure: -> not (features?.chinaInfra ? false)
-  useSocialSignOn: -> not (features?.chinaUx ? false)
+  useSocialSignOn: -> not ((features?.chinaUx ? false) or (features?.china ? false))
+  isTarena: -> features?.Tarena ? false
+  useTarenaLogo: -> @isTarena()
+  hideTopRightNav: -> @isTarena()
+  hideFooter: -> @isTarena()
+  useGoogleClassroom: -> not (features?.chinaUx ? false) and me.get('gplusID')?   # if signed in using google SSO
+  useGoogleAnalytics: -> not ((features?.china ? false) or (features?.chinaInfra ? false))
+  # features.china is set globally for our China server
+  showChinaVideo: -> (features?.china ? false) or (features?.chinaInfra ? false)
+  canAccessCampaignFreelyFromChina: (campaignID) -> campaignID == "55b29efd1cd6abe8ce07db0d" # teacher can only access CS1 freely in China
+  isCreatedByTarena: -> @get('clientCreator') == "5c80a2a0d78b69002448f545"   #ClientID of Tarena2 on koudashijie.com
+  showForumLink: -> not (features?.china ? false)
+  showChinaResourceInfo: -> features?.china ? false
+  useChinaHomeView: -> features?.china ? false
+  showChinaRegistration: -> features?.china ? false
+  enableCpp: -> me.hasSubscription() || me.isStudent() || me.isTeacher()
+  useQiyukf: -> features?.china ? false
+  useChinaServices: -> features?.china ? false
+  useGeneralArticle: -> not (features?.china ? false)
+
+  # Special flag to detect whether we're temporarily showing static html while loading full site
+  showingStaticPagesWhileLoading: -> false
+  showIndividualRegister: -> not (features?.china ? false)
+  hideDiplomatModal: -> features?.china ? false
+  showChinaRemindToast: -> features?.china ? false
+  showOpenResourceLink: -> not (features?.china ? false)
+  useStripe: -> (not ((features?.china ? false) or (features?.chinaInfra ? false))) and (@get('preferredLanguage') isnt 'nl-BE')
+  canDeleteAccount: -> not (features?.china ? false)
+
+  # Ozaria flags
+  showOzariaCampaign: -> @isAdmin()
+  hasCinematicAccess: -> @isAdmin()
+  hasCharCustomizationAccess: -> @isAdmin()
+  hasAvatarSelectorAccess: -> @isAdmin()
+  hasCutsceneAccess: -> @isAdmin()
+  hasInteractiveAccess: -> @isAdmin()
+  hasIntroLevelAccess: -> @isAdmin()
 
 
 tiersByLevel = [-1, 0, 0.05, 0.14, 0.18, 0.32, 0.41, 0.5, 0.64, 0.82, 0.91, 1.04, 1.22, 1.35, 1.48, 1.65, 1.78, 1.96, 2.1, 2.24, 2.38, 2.55, 2.69, 2.86, 3.03, 3.16, 3.29, 3.42, 3.58, 3.74, 3.89, 4.04, 4.19, 4.32, 4.47, 4.64, 4.79, 4.96,
@@ -515,4 +604,3 @@ tiersByLevel = [-1, 0, 0.05, 0.14, 0.18, 0.32, 0.41, 0.5, 0.64, 0.82, 0.91, 1.04
 
 # Make UserLib accessible via eg. User.broadName(userObj)
 _.assign(User, UserLib)
-

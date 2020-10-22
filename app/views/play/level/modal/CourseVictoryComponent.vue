@@ -1,4 +1,4 @@
-<template lang="jade">
+<template lang="pug">
   .modal-content#course-victory-component
     .modal-header
       img.header-img(:src="headerImage")
@@ -28,7 +28,7 @@
               div {{ $t('play_level.combo_challenge_complete_body', { concept: primaryConcept }) }}
                   
             div.clearfix.well.well-sm.well-parchment(v-else-if="assessmentNext")
-              img.lock-banner(src="/images/pages/play/modal/lock_banner.png")
+              img.lock-banner(src="/images/pages/play/modal/unlocked_banner.png")
               h5.text-uppercase
                 span(v-if="nextAssessment.assessment === 'cumulative'")
                   | {{ $t('play_level.combo_challenge_unlocked') }}:
@@ -51,8 +51,8 @@
             )
               | {{ $t('play_level.replay_level') }}
         .row(v-else-if="assessmentNext && !level.assessment")
-          .col-sm-5.col-sm-offset-7
-            a#start-challenge-btn.btn.btn-illustrated.btn-success.btn-block.btn-lg.text-uppercase(
+          .col-sm-6.col-sm-offset-6
+            a#start-challenge-btn.btn.btn-illustrated.btn-success.btn-block.btn-lg.btn-glow.text-uppercase(
               @click="onStartChallenge",
               :href="challengeLink"
             )
@@ -68,7 +68,12 @@
               h5 {{ $dbt(course, 'name') }}
               h3(v-if="stats")
                 | Levels Complete: {{ stats.levels.numDone }}/{{ stats.levels.size }}
-          .col-sm-6(v-if="nextLevel._id")
+          .col-sm-6(v-if="nextLevelVideo")
+            .well.well-sm.well-parchment
+              h5.text-uppercase {{ $t('play.next') }}:
+              h3.text-uppercase {{ $t('play_level.learn_new_concepts') }}
+              h5.text-uppercase {{ $t('play_level.watch_a_video', { concept_name: nextLevelVideo.title }) }}
+          .col-sm-6(v-else-if="nextLevel._id")
             .well.well-sm.well-parchment
               h5.text-uppercase {{ $t('play_level.next_level') }}:
               h3.text-uppercase {{ $dbt(nextLevel, 'name') }}
@@ -76,12 +81,19 @@
     
         .row
           .col-sm-6.text-uppercase
-            a#map-btn.btn.btn-illustrated.btn-primary.btn-block.btn-lg.text-uppercase(
+            a#map-btn.btn.btn-illustrated.btn-block.btn-lg.text-uppercase(
               @click="onBackToMap",
               :href="mapLink"
             )
               | {{ $t('play_level.back_to_map') }}
-          .col-sm-6.text-uppercase(v-if="nextLevel._id")
+          .col-sm-6.text-uppercase(v-if="nextLevelVideo")
+            a#next-level-btn.btn.btn-illustrated.btn-block.btn-lg.text-uppercase(
+              @click="onNextLevelVideo",
+              :href="nextLevelVideoLink",
+              :class="nextLevelLinkClasses"
+            )
+              | {{ $t('play.next') }}
+          .col-sm-6.text-uppercase(v-else-if="nextLevel._id")
             a#next-level-btn.btn.btn-illustrated.btn-block.btn-lg.text-uppercase(
               @click="onNextLevel",
               :href="nextLevelLink",
@@ -100,14 +112,17 @@
   Level = require 'models/Level'
   LevelSession = require 'models/LevelSession'
   heroMap = _.invert(thangTypeConstants.heroes)
+  { getNextLevelLink } = require 'ozaria/site/common/ozariaUtils'
   
   module.exports = Vue.extend({
     # TODO: Move these props to vuex
-    props: ['nextLevel', 'nextAssessment', 'session', 'course', 'courseInstanceID', 'stats', 'supermodel', 'parent', 'codeLanguage'],
+    props: ['nextLevel', 'nextLevelStage', 'nextAssessment', 'session', 'course', 'courseInstanceID', 'stats', 'supermodel', 'parent', 'codeLanguage'],
     components: {
       PieChart
     }
     computed: {
+      ozariaCourse: ->
+        return utils.ozariaCourseIDs.includes(@course._id)
       challengeLink: ->
         if me.isSessionless()
           link = "/play/level/#{@nextAssessment.slug}?course=#{@course._id}&codeLanguage=#{utils.getQueryVariable('codeLanguage', 'python')}"
@@ -118,22 +133,37 @@
       mapLink: ->
         if me.isSessionless()
           link = "/teachers/courses"
+        else if this.ozariaCourse
+          link = "/ozaria/play/#{@course.campaignID}?course-instance=#{@courseInstanceID}"
         else
           link = "/play/#{@course.campaignID}?course-instance=#{@courseInstanceID}"
         return link
       nextLevelLink: ->
         if !me.showHeroAndInventoryModalsToStudents()
-          if me.isSessionless()
+          if this.ozariaCourse
+            linkOptions = {
+              courseId: @course._id,
+              courseInstanceId: @courseInstanceID,
+              codeLanguage: utils.getQueryVariable('codeLanguage', 'python'),
+              nextLevelStage: @nextLevelStage
+            }
+            link = getNextLevelLink(@nextLevel, linkOptions)
+          else if me.isSessionless()
             link = "/play/level/#{@nextLevel.slug}?course=#{@course._id}&codeLanguage=#{utils.getQueryVariable('codeLanguage', 'python')}"
           else
             link = "/play/level/#{@nextLevel.slug}?course=#{@course._id}&course-instance=#{@courseInstanceID}"
             link += "&codeLanguage=" + @level.primerLanguage if @level.primerLanguage
           return link
+      nextLevelVideoLink: ->
+        link = "/play/video/level/#{@nextLevel.slug}?course=#{@course._id}&course-instance=#{@courseInstanceID}"
+        link += "&codeLanguage=" + @level.primerLanguage if @level.primerLanguage
+        link += "&level=" + @nextLevel.original
+        return link
       nextLevelLinkClasses: ->
         if @assessmentNext
           { 'btn-default': true }
         else
-          { 'btn-success': true }
+          { 'btn-success': true , 'btn-glow': true  }
       headerImage: ->
         if @level.assessment
           return "/images/pages/play/modal/challenge_complete.png"
@@ -171,6 +201,9 @@
           return "/images/pages/play/modal/combo_complete.png"
         else
           return "/images/pages/play/modal/combo_incomplete.png"
+      nextLevelVideo: ->
+        if me.isStudent() and @course._id == utils.courseIDs.INTRODUCTION_TO_COMPUTER_SCIENCE and !me.showHeroAndInventoryModalsToStudents()
+          return utils.videoLevels[@nextLevel.original]
     }
     methods: {
       marked
@@ -193,6 +226,19 @@
             }, 
             []
         )
+      
+      onNextLevelVideo: ->
+        window.tracker?.trackEvent(
+          'Play Level Victory Modal Next Level Video',
+            {
+              category: 'Students'
+              levelSlug: @level.slug
+              nextLevelSlug: @nextLevel.slug
+              nextLevelVideoTitle: @nextLevelVideo.title
+            },
+            []
+        )
+      
       onNextLevel: ->
         window.tracker?.trackEvent(
           'Play Level Victory Modal Next Level',
@@ -226,6 +272,21 @@
 </script>
 
 <style lang="sass">
+
+  @import "app/styles/mixins"
+  @import "app/styles/bootstrap/variables"
+
+  +keyframes(winnablePulse)
+    from
+      @include box-shadow(0px 0px 8px #333)
+      color: white
+    50%
+      @include box-shadow(0px 0px 35px #87CEFF)
+      color: #87CEFF
+    to
+      @include box-shadow(0px 0px 8px #333)
+      color: white
+
   #course-victory-component
     img.header-img
       position: relative
@@ -240,7 +301,7 @@
       
     h3, h5
       color: black
-  
+
     .lock-banner
       float: left
       width: 120px
@@ -248,19 +309,19 @@
     
     .well
       margin: 10px 0 0
-  
+
     .modal-body
       padding: 0px 20px 0
       position: relative
       top: 80px
       margin-top: 80px
-  
+
       @media screen and ( max-height: 650px )
         padding-top: 10px
-  
+
       .well-parchment
         margin-top: 20px
-  
+
         @media screen and ( max-height: 675px )
           margin-top: 0
     
@@ -304,5 +365,8 @@
         position: absolute
         bottom: 0
         left: 10px
-  
+
+    .btn-glow
+      @include animation(winnablePulse 3s infinite)
+
 </style>

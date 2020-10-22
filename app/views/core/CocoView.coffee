@@ -74,6 +74,7 @@ module.exports = class CocoView extends Backbone.View
     @undelegateEvents() # removes both events and subs
     view.destroy() for id, view of @subviews
     $('#modal-wrapper .modal').off 'hidden.bs.modal', @modalClosed
+    $('#modal-wrapper .modal').off 'shown.bs.modal', @modalShown
     @$el.find('.has-tooltip, [data-original-title]').tooltip 'destroy'
     @endHighlight()
     @getPointer(false).remove()
@@ -216,10 +217,15 @@ module.exports = class CocoView extends Backbone.View
     _.defer => @$el.find('.nano').nanoScroller() unless @destroyed
 
   updateProgress: (progress) ->
+    return if @destroyed
+
     @loadProgress.progress = progress if progress > @loadProgress.progress
     @updateProgressBar(progress)
 
-  updateProgressBar: (progress) =>
+  updateProgressBar: (progress) ->
+    return if @destroyed
+
+    @trigger('loading:progress', progress * 100)
     prog = "#{parseInt(progress*100)}%"
     @$el?.find('.loading-container .progress-bar').css('width', prog)
 
@@ -241,11 +247,10 @@ module.exports = class CocoView extends Backbone.View
     if me.isStudent()
       console.error("Student clicked contact modal.")
       return
+
     if me.isTeacher(true)
       if application.isProduction()
-        window.Intercom?('show')
-      else
-        alert('Teachers, Intercom widget only available in production.')
+        application.tracker.drift.sidebar.open()
     else
       ContactModal = require 'views/core/ContactModal'
       @openModalView(new ContactModal())
@@ -276,23 +281,23 @@ module.exports = class CocoView extends Backbone.View
     viewLoad = new ViewLoadTimer(modalView)
     modalView.render()
 
-    # Redirect to the woo when trying to log in or signup
-    if features.codePlay
-      if modalView.id is 'create-account-modal'
-        return document.location.href = '//lenovogamestate.com/register/?cocoId='+me.id
-      if modalView.id is 'auth-modal'
-        return document.location.href = '//lenovogamestate.com/login/?cocoId='+me.id
-
     $('#modal-wrapper').removeClass('hide').empty().append modalView.el
     modalView.afterInsert()
     visibleModal = modalView
     modalOptions = {show: true, backdrop: if modalView.closesOnClickOutside then true else 'static'}
-    $('#modal-wrapper .modal').modal(modalOptions).on 'hidden.bs.modal', @modalClosed
+    if typeof modalView.closesOnEscape is 'boolean' and modalView.closesOnEscape is false # by default, closes on escape, i.e. if modalView.closesOnEscape = undefined
+      modalOptions.keyboard = false
+    modalRef = $('#modal-wrapper .modal').modal(modalOptions)
+    modalRef.on 'hidden.bs.modal', @modalClosed
+    modalRef.on 'shown.bs.modal', @modalShown
     window.currentModal = modalView
     @getRootView().stopListeningToShortcuts(true)
     Backbone.Mediator.publish 'modal:opened', {}
     viewLoad.record()
     return modalView
+
+  modalShown: =>
+    visibleModal.trigger('shown')
 
   modalClosed: =>
     visibleModal.willDisappear() if visibleModal
@@ -312,6 +317,7 @@ module.exports = class CocoView extends Backbone.View
   # Loading RootViews
 
   showLoading: ($el=@$el) ->
+    @trigger('loading:show')
     $el.find('>').addClass('hidden')
     $el.append(loadingScreenTemplate()).i18n()
     @applyRTLIfNeeded()
@@ -319,6 +325,7 @@ module.exports = class CocoView extends Backbone.View
 
   hideLoading: ->
     return unless @_lastLoading?
+    @trigger('loading:hide')
     @_lastLoading.find('.loading-screen').remove()
     @_lastLoading.find('>').removeClass('hidden')
     @_lastLoading = null
@@ -560,9 +567,11 @@ module.exports = class CocoView extends Backbone.View
   tryCopy: ->
     try
       document.execCommand('copy')
+      message = 'Copied to clipboard'
+      noty text: message, layout: 'topCenter', type: 'info', killer: false, timeout: 2000
     catch err
       message = 'Oops, unable to copy'
-      noty text: message, layout: 'topCenter', type: 'error', killer: false
+      noty text: message, layout: 'topCenter', type: 'error', killer: false, timeout: 3000
 
   wait: (event) -> new Promise((resolve) => @once(event, resolve))
 

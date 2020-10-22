@@ -22,6 +22,7 @@ module.exports = class TeacherCoursesView extends RootView
     'click .guide-btn': 'onClickGuideButton'
     'click .play-level-button': 'onClickPlayLevel'
     'click .show-change-log': 'onClickShowChange'
+    'click .video-thumbnail': 'onClickVideoThumbnail'
 
   getTitle: -> return $.i18n.t('teacher.courses')
 
@@ -29,12 +30,13 @@ module.exports = class TeacherCoursesView extends RootView
     super(options)
     application.setHocCampaign('') # teachers playing levels from here return here
     @utils = require 'core/utils'
+    @enableCpp = me.enableCpp()
     @ownedClassrooms = new Classrooms()
     @ownedClassrooms.fetchMine({data: {project: '_id'}})
     @supermodel.trackCollection(@ownedClassrooms)
     @courses = new Courses()
     @prepaids = new Prepaids()
-    @paidTeacher = me.isAdmin() or me.isTeacher() and /@codeninjas.com$/i.test me.get('email')
+    @paidTeacher = me.isAdmin() or me.isPaidTeacher()
     if me.isAdmin()
       @supermodel.trackRequest @courses.fetch()
     else
@@ -44,6 +46,7 @@ module.exports = class TeacherCoursesView extends RootView
     @supermodel.trackRequest @campaigns.fetchByType('course', { data: { project: 'levels,levelsUpdated' } })
     @campaignLevelNumberMap = {}
     @courseChangeLog = {}
+    @videoLevels = utils.videoLevels || {}
     window.tracker?.trackEvent 'Classes Guides Loaded', category: 'Teachers', ['Mixpanel']
 
   onLoaded: ->
@@ -99,3 +102,27 @@ module.exports = class TeacherCoursesView extends RootView
     else
       changeLogText.addClass('hidden')
       showChangeLog.text($.i18n.t('courses.show_change_log'))
+
+  onClickVideoThumbnail: (e) ->
+    @$('#video-modal').modal('show')
+    image_src = e.target.src.slice(e.target.src.search('/images'))
+    video = (Object.values(@videoLevels || {}).find((l) => l.thumbnail_unlocked == image_src) || {})
+    @$('.video-player')[0].src = if me.showChinaVideo() then video.cn_url else video.url
+
+    if !me.showChinaVideo()
+      require.ensure(['@vimeo/player'], (require) =>
+        VideoPlayer = require('@vimeo/player').default
+        @videoPlayer = new VideoPlayer(@$('.video-player')[0])
+        @videoPlayer.play().catch((err) => console.error("Error while playing the video:", err))
+      , (e) =>
+        console.error e
+      , 'vimeo')
+    @$('#video-modal').on ('hide.bs.modal'), (e)=>
+      if me.showChinaVideo()
+        @$('.video-player').attr('src', '');
+      else
+        @videoPlayer?.pause()
+
+  destroy: ->
+    @$('#video-modal').modal('hide')
+    super()

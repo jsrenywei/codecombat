@@ -41,7 +41,7 @@ module.exports = class LevelSession extends CocoModel
     @get('submittedCodeLanguage')? and @get('team')?
 
   completed: ->
-    @get('state')?.complete || @get('submitted') || false
+    @get('state')?.complete || false
 
   shouldAvoidCorruptData: (attrs) ->
     return false unless me.team is 'humans'
@@ -175,5 +175,6 @@ commentStarts =
   coffeescript: '#'
   lua: '--'
   java: '//'
+  cpp: '//'
   html: '<!--'
   css: '/\\*'
